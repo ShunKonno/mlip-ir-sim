@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Simulation outputs / trajectories
+*.traj
+*.xyz.bak
+*.log
+*.out
+*.nc
+
+# Local envs
+.venv/
+venv/
+
