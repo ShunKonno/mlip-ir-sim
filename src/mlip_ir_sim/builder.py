@@ -1,8 +1,9 @@
-"""Periodic simulation cell builder.
+"""Simulation cell builder.
 
-Reads a single-molecule XYZ, replicates it into a cubic PBC box at a
-target density using random placement with overlap detection, then
-attaches the requested MACE calculator.
+Reads a single-molecule XYZ (random packing) or a CIF (crystal), builds a
+periodic cell, and attaches a force field / MLIP.  The calculator is fully
+pluggable: pass any ASE calculator instance (or a ``factory(atoms) -> calc``
+callable), or give a ``model`` string to use the built-in MACE shortcut.
 """
 from __future__ import annotations
 
@@ -26,26 +27,43 @@ class SystemConfig:
     dtype: str = "float32"
     cif_path: Path | None = None       # crystal-structure input (overrides xyz)
     supercell: tuple[int, int, int] | None = None  # None → auto from cutoff
+    periodic: bool = True              # False → finite cluster (molecular MLIPs)
 
 
 class SystemBuilder:
-    """Build a periodic cell from a single-molecule XYZ file.
+    """Build a simulation cell from a single-molecule XYZ or a crystal CIF.
+
+    The calculator is force-field-agnostic.  Provide exactly one of:
+
+    * ``calculator`` — any ASE calculator instance (MACE, AIMNet2, an OpenMM
+      classical FF, a custom potential, …), or a ``factory(atoms) -> calc``
+      callable for calculators that must size themselves to the built cell.
+    * ``model`` — a MACE model name (built-in convenience shortcut).
 
     Parameters
     ----------
     xyz_path : str or Path
-        Path to the optimised single-molecule XYZ geometry.
+        Path to the optimised single-molecule XYZ geometry (random packing).
     num_molecules : int
         Number of molecules to place in the simulation cell.
     model : str or None
-        MACE model identifier, e.g. ``"MACE-OFF23(Small)"``.
-        If *None*, no calculator is attached.
+        MACE model identifier, e.g. ``"MACE-OFF23(Small)"``.  Mutually
+        exclusive with ``calculator``.  If both are *None*, no calculator is
+        attached (build geometry only).
+    calculator : ase Calculator, callable, or None
+        A ready calculator instance, or a ``factory(atoms) -> calculator``.
+        Takes precedence over ``model``.
     density_gcc : float
         Initial packing density in g/cm³.  Use a lower value if placement
         fails; the system will equilibrate to the physical density.
     device : str
-        PyTorch device: ``"cpu"``, ``"mps"`` (Apple-Silicon GPU), ``"cuda"``,
-        or ``"auto"`` (prefer mps → cuda → cpu).  MPS forces float32.
+        PyTorch device for the MACE shortcut: ``"cpu"``, ``"mps"``, ``"cuda"``,
+        or ``"auto"``.  Ignored when ``calculator`` is supplied.
+    periodic : bool
+        If *False*, build a finite (non-periodic) cluster — appropriate for
+        molecular MLIPs that do not use periodic images.  The simulator then
+        skips the densification / NPT stages automatically.  Crystal (CIF)
+        input is always periodic.
     """
 
     def __init__(
@@ -53,14 +71,18 @@ class SystemBuilder:
         xyz_path: str | Path | None = None,
         num_molecules: int = 0,
         model: str | None = None,
+        calculator=None,
         density_gcc: float = 0.5,
         device: str = "cpu",
         dtype: str = "float32",
         cif_path: str | Path | None = None,
         supercell: tuple[int, int, int] | None = None,
+        periodic: bool = True,
     ):
         if xyz_path is None and cif_path is None:
             raise ValueError("Provide either xyz_path (random packing) or cif_path (crystal).")
+        if model is not None and calculator is not None:
+            raise ValueError("Provide either `model` or `calculator`, not both.")
         self.config = SystemConfig(
             xyz_path=Path(xyz_path) if xyz_path is not None else None,
             num_molecules=int(num_molecules),
@@ -70,10 +92,38 @@ class SystemBuilder:
             dtype=dtype,
             cif_path=Path(cif_path) if cif_path is not None else None,
             supercell=tuple(supercell) if supercell is not None else None,
+            periodic=bool(periodic),
         )
+        self._calculator = calculator
         self.is_crystal = cif_path is not None
         self.num_molecules_actual: int | None = None  # set by build()
         self._atoms = None  # cached result
+
+    def _attach_calculator(self, atoms) -> None:
+        """Attach the calculator: injected instance/factory, or MACE ``model``.
+
+        ``calculator`` (if given) takes precedence and may be either a ready
+        ASE calculator instance or a ``factory(atoms) -> calculator`` callable
+        (use a factory for calculators that must size themselves to the cell,
+        e.g. a periodic classical force field).
+        """
+        from ase.calculators.calculator import Calculator as _ASECalc
+
+        if self._calculator is not None:
+            if isinstance(self._calculator, _ASECalc):
+                calc = self._calculator
+            elif callable(self._calculator):
+                calc = self._calculator(atoms)
+            else:
+                calc = self._calculator  # duck-typed calculator instance
+            atoms.calc = calc
+            print(f"[builder] Attached calculator: {type(calc).__name__}")
+        elif self.config.model is not None:
+            calc = _make_calculator(self.config.model, self.config.device,
+                                    self.config.dtype)
+            atoms.calc = calc
+            actual_device = getattr(calc, "device", self.config.device)
+            print(f"[builder] Attached calculator: {self.config.model} on {actual_device}")
 
     # ------------------------------------------------------------------
     # Public API
@@ -111,11 +161,7 @@ class SystemBuilder:
 
         if cfg.cif_path is not None:
             atoms = self._build_from_cif()
-            if cfg.model is not None:
-                calc = _make_calculator(cfg.model, cfg.device, cfg.dtype)
-                atoms.calc = calc
-                actual_device = getattr(calc, "device", cfg.device)
-                print(f"[builder] Attached calculator: {cfg.model} on {actual_device}")
+            self._attach_calculator(atoms)
             self._atoms = atoms
             return atoms
 
@@ -168,12 +214,11 @@ class SystemBuilder:
         # MACE-safe.  A point-wise numpy relaxation would tear rigid molecules
         # apart (inter-molecular forces move atoms independently).
 
-        # ---- Attach MACE calculator ----
-        if cfg.model is not None:
-            calc = _make_calculator(cfg.model, cfg.device, cfg.dtype)
-            atoms.calc = calc
-            actual_device = getattr(calc, "device", cfg.device)
-            print(f"[builder] Attached calculator: {cfg.model} on {actual_device}")
+        # ---- Periodicity (False → finite cluster for molecular MLIPs) ----
+        atoms.pbc = cfg.periodic
+
+        # ---- Attach calculator (any ASE calculator, or the MACE shortcut) ----
+        self._attach_calculator(atoms)
 
         self._atoms = atoms
         return atoms

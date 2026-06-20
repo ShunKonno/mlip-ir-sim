@@ -1,6 +1,5 @@
 """Fast unit tests for IRSpectrum — no MACE or heavy dependencies required."""
 import json
-from pathlib import Path
 
 import numpy as np
 import pytest

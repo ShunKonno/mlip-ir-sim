@@ -2,19 +2,29 @@
 
 Python library for simulating **transmission IR spectra** of organic molecules using machine-learning interatomic potentials (MLIPs) and molecular dynamics.
 
-The pipeline couples a MACE (or AIMNet2) force field with an ASE MD engine to record the total dipole moment trajectory, Fourier-transforms the autocorrelation function into a broadened IR absorption spectrum, and returns a customisable `IRSpectrum` result object.
+The pipeline drives **any ASE-compatible force field or MLIP** with an ASE MD engine, records the total dipole-moment trajectory, Fourier-transforms its autocorrelation function into a broadened IR absorption spectrum, and returns a customisable `IRSpectrum` result object.
 
 ---
 
 ## Features
 
-- Random-packing or crystal-start (CIF) simulation cell builder
-- Multi-stage MD equilibration (cold eq → warm-up → densification → NPT → NVT → NVE production)
+- **Force-field-agnostic** — plug in any ASE calculator; the pipeline reads its `implemented_properties` and adapts automatically
+- Random-packing, crystal-start (CIF), or non-periodic cluster cell builder
+- Multi-stage MD (cold eq → warm-up → densification → NPT → NVT → NVE production)
 - Dipole ACF → transmission IR spectrum with Schofield / detailed-balance quantum correction
 - `IRSpectrum` result object with matplotlib plotting and CSV / JSON serialisation
 - Checkpoint / resume support for long HPC runs
-- Optional GFN2-xTB partial charges (conformer-specific, via tblite)
-- Optional AIMNet2 dynamic-charge calculator (∂q/∂r at every MD step)
+
+### How the pipeline adapts to your calculator
+
+The simulator inspects the attached calculator and chooses the right path — no configuration needed:
+
+| Your calculator provides… | Pipeline behaviour |
+|---|---|
+| **forces only** (most classical FFs, forces-only MLIPs) | NVT + NVE; charges assigned for the dipole (`charge_method`) |
+| **forces + stress** (MACE-OFF/-MP, periodic FFs) | adds the NPT barostat (densification + optional annealing) |
+| **forces + per-atom charges** (AIMNet2-style) | dynamic per-step dipole (captures ∂q/∂r); no charge assignment |
+| **non-periodic** (`periodic=False`, molecular MLIPs) | finite cluster: densification / NPT skipped |
 
 ---
 
@@ -68,6 +78,30 @@ spectrum.save("ir_spectrum.csv")                    # two-column CSV
 spectrum.save("ir_spectrum.json", format="json")    # JSON with metadata
 ```
 
+### Plugging in any calculator
+
+Pass `calculator=` with a ready ASE calculator instance, or a `factory(atoms) -> calculator` callable for potentials that must size themselves to the built cell (e.g. a periodic classical force field):
+
+```python
+# (a) any ASE calculator instance
+from some_mlip import MyCalculator
+system = SystemBuilder(xyz_path="molecule.xyz", num_molecules=30,
+                       calculator=MyCalculator())
+
+# (b) a factory that receives the built Atoms object
+def make_calc(atoms):
+    return ClassicalForceField(atoms, ...)   # e.g. an OpenMM-backed calculator
+
+system = SystemBuilder(xyz_path="molecule.xyz", num_molecules=30,
+                       calculator=make_calc)
+
+# (c) molecular MLIP with no periodic images → finite cluster
+system = SystemBuilder(xyz_path="molecule.xyz", num_molecules=30,
+                       calculator=MolecularMLIP(), periodic=False)
+```
+
+`model=` and `calculator=` are mutually exclusive: `model` is just a built-in shortcut for MACE.
+
 ### Crystal-start simulation (from CIF)
 
 ```python
@@ -91,15 +125,18 @@ spectrum = sim.run(temperature=300.0, eq_time_ps=5.0, prod_time_ps=50.0)
 SystemBuilder(
     xyz_path: str | Path | None = None,      # single-molecule XYZ (random packing)
     num_molecules: int = 0,
-    model: str | None = None,                 # "MACE-OFF23(Small/Medium/Large)"
+    model: str | None = None,                 # MACE shortcut, e.g. "MACE-OFF23(Small)"
+    calculator=None,                          # any ASE calculator, or factory(atoms)->calc
     density_gcc: float = 0.85,                # target density (g/cm³)
-    device: str = "cpu",                      # "cpu" | "cuda" | "mps" | "auto"
+    device: str = "cpu",                      # "cpu" | "cuda" | "mps" | "auto" (MACE only)
     dtype: str = "float32",
     cif_path: str | Path | None = None,       # crystal-start (alternative to xyz_path)
     supercell: tuple[int, int, int] | None = None,
+    periodic: bool = True,                    # False → finite cluster (molecular MLIPs)
 )
 ```
 
+Provide **either** `model` (MACE shortcut) **or** `calculator` (any ASE calculator).
 Call `.build()` to obtain the ASE `Atoms` object (result is cached).
 
 ### `IRSpectrumSimulator.run()`
@@ -113,7 +150,7 @@ Call `.build()` to obtain the ASE `Atoms` object (result is cached).
 | `timestep_fs` | `0.5` | MD timestep (fs) |
 | `fwhm_cm1` | `10.0` | Gaussian peak width (cm⁻¹) |
 | `quantum_correction` | `"schofield"` | `"schofield"` / `"detailed_balance"` / `"none"` |
-| `charge_method` | `"xtb"` | `"xtb"` (GFN2) or `"gaff"` (rule-based) |
+| `charge_method` | `"auto"` | dipole charges when the calculator has none: `"auto"` (xtb→gaff), `"xtb"` (GFN2), `"gaff"` (rule-based) |
 | `traj_path` | `None` | Path for Extended-XYZ trajectory (OVITO-readable) |
 | `checkpoint_path` | `None` | Checkpoint file for pause/resume |
 | `anneal_T` | `0.0` | Melt temperature for annealing stage (K) |

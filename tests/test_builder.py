@@ -65,3 +65,54 @@ def test_formula():
     assert (numbers == 6).sum() == 2 * 18  # 18 C per molecule
     assert (numbers == 8).sum() == 2 * 2   # 2 O per molecule
     assert (numbers == 1).sum() == 2 * 36  # 36 H per molecule
+
+
+# ── Pluggable calculator injection (force-field-agnostic) ────────────────────
+
+def _dummy_calc():
+    from ase.calculators.calculator import Calculator, all_changes
+
+    class _Dummy(Calculator):
+        implemented_properties = ["energy", "forces"]
+
+        def calculate(self, atoms=None, properties=("energy",),
+                      system_changes=all_changes):
+            super().calculate(atoms, properties, system_changes)
+            self.results = {"energy": 0.0,
+                            "forces": np.zeros((len(self.atoms), 3))}
+
+    return _Dummy()
+
+
+def test_inject_calculator_instance():
+    calc = _dummy_calc()
+    system = SystemBuilder(xyz_path=XYZ, num_molecules=2, calculator=calc)
+    atoms = system.build()
+    assert atoms.calc is calc
+
+
+def test_inject_calculator_factory():
+    """A factory(atoms) -> calculator is called with the built cell."""
+    seen = {}
+
+    def factory(atoms):
+        seen["n"] = len(atoms)
+        return _dummy_calc()
+
+    system = SystemBuilder(xyz_path=XYZ, num_molecules=2, calculator=factory)
+    atoms = system.build()
+    assert seen["n"] == len(atoms)
+    assert atoms.calc is not None
+
+
+def test_model_and_calculator_mutually_exclusive():
+    with pytest.raises(ValueError, match="not both"):
+        SystemBuilder(xyz_path=XYZ, num_molecules=2,
+                      model="MACE-OFF23(Small)", calculator=_dummy_calc())
+
+
+def test_periodic_false_gives_cluster():
+    system = SystemBuilder(xyz_path=XYZ, num_molecules=2,
+                           calculator=_dummy_calc(), periodic=False)
+    atoms = system.build()
+    assert not atoms.get_pbc().any()

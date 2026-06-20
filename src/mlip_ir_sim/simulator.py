@@ -116,9 +116,21 @@ class IRSpectrumSimulator:
         traj_interval: int = 100,
         checkpoint_path: str | None = None,
         checkpoint_interval: int = 1000,
-        charge_method: str = "xtb",
+        charge_method: str = "auto",
     ) -> "IRSpectrum":  # noqa: F821
-        """Run the densify-then-NPT MD pipeline and return the IR spectrum.
+        """Run the MD pipeline and return the IR spectrum.
+
+        The pipeline is force-field-agnostic: it inspects the attached ASE
+        calculator's ``implemented_properties`` and adapts automatically.
+
+        * **stress** present → the NPT barostat (densify refinement and any
+          annealing) runs.  Absent → those stages are skipped and the run is
+          NVT + NVE only (works for any forces-only potential).
+        * **charges** present → the production dipole uses the calculator's
+          per-step charges (dynamic ∂q/∂r, e.g. AIMNet2).  Absent → charges are
+          assigned once (``charge_method`` below).
+        * **non-periodic** cell (``SystemBuilder(periodic=False)``) → the
+          densification / NPT stages are skipped (finite-cluster mode).
 
         Parameters
         ----------
@@ -163,12 +175,14 @@ class IRSpectrumSimulator:
         checkpoint_interval : int
             Steps between Stage F checkpoint saves.  Default 1000.
         charge_method : str
-            Partial charges for the production dipole.  ``"xtb"`` (default):
-            one GFN2-xTB single point per molecule at the equilibrated
-            geometry (after Stage E) — quantum-derived, conformer-specific.
-            ``"gaff"``: rule-based functional-group charges (no extra
-            dependency).  Falls back to gaff with a warning if tblite is not
-            installed.
+            Charges for the production dipole *when the calculator does not
+            output its own charges*.  ``"auto"`` (default): use GFN2-xTB,
+            degrading to ``"gaff"`` if tblite is unavailable.  ``"xtb"``: one
+            GFN2-xTB single point per molecule at the equilibrated geometry
+            (quantum-derived, conformer-specific).  ``"gaff"``: rule-based
+            functional-group charges (no extra dependency).  Ignored entirely
+            when the calculator implements ``"charges"`` (those are used
+            per-step instead).
         """
         import ase.units as u
         from ase.io import write as ase_write
@@ -283,6 +297,31 @@ class IRSpectrumSimulator:
         n_eq   = max(1, int(round(eq_time_ps * 1e3 / timestep_fs)))
         n_prod = max(1, int(round(prod_time_ps * 1e3 / timestep_fs)))
 
+        # ── Calculator capability detection (force-field-agnostic) ─────────
+        # ASE exposes a calculator's outputs via `implemented_properties`; the
+        # pipeline reads them and adapts:
+        #   stress      → NPT barostat (Stage D / annealing) can run
+        #   charges     → per-step dynamic dipole (no charge pre-assignment)
+        #   periodicity → cell-changing stages (densify / NPT) are meaningful
+        _impl = list(getattr(true_calc, "implemented_properties", []) or [])
+        has_stress  = "stress" in _impl
+        has_charges = "charges" in _impl
+        is_periodic = bool(np.any(atoms.get_pbc()))
+
+        if n_npt > 0 and not (has_stress and is_periodic):
+            why = ("calculator provides no stress" if not has_stress
+                   else "system is non-periodic")
+            print(f"[simulator] NPT/annealing disabled ({why}) — NVT + NVE only.")
+            n_npt = 0
+            annealing = False
+            n_anneal = n_cool = 0
+
+        # Resolve the charge source up-front so checkpoints store a stable tag.
+        if has_charges:
+            charge_method = "dynamic"
+        elif charge_method == "auto":
+            charge_method = "xtb"   # degrades to gaff if tblite is unavailable
+
         L0 = float(atoms.cell[0, 0])
         if is_crystal and annealing:
             print("[simulator] WARNING: annealing above the melting point will "
@@ -372,6 +411,8 @@ class IRSpectrumSimulator:
             if is_crystal:
                 print(f"[simulator] Stage C  skipped (crystal at experimental "
                       f"ρ={_density_gcc():.3f} g/cm³).")
+            elif not is_periodic:
+                print("[simulator] Stage C  skipped (non-periodic cluster).")
             elif L_target < L0:
                 print(f"[simulator] Stage C  Densify L {L0:.2f}→{L_target:.2f} Å "
                       f"({n_comp} steps)…")
@@ -520,12 +561,18 @@ class IRSpectrumSimulator:
             resuming_f = False
 
         # ── Partial charges for the production dipole ─────────────────────
-        # xtb: one GFN2-xTB single point per molecule at the *equilibrated*
-        # geometry — conformer-specific quantum charges.  Computed once here,
-        # fixed during production, and carried through checkpoints so a
-        # resumed run reuses the identical charges (no dipole discontinuity).
+        # If the calculator outputs charges, the dipole is built from its
+        # per-step charges (handled in Stage F) and nothing is pre-assigned.
+        # Otherwise charges are fixed once at the equilibrated geometry:
+        #   xtb  — one GFN2-xTB single point per molecule (quantum, conformer-
+        #          specific), carried through checkpoints for a seamless resume.
+        #   gaff — rule-based functional-group charges (no extra dependency;
+        #          DipoleTracker assigns them when `charges` is None).
         charges = None
-        if resuming_f and ckpt.get('charges') is not None:
+        if has_charges:
+            print("[simulator] Calculator outputs per-atom charges — using "
+                  "dynamic per-step charges for the dipole.")
+        elif resuming_f and ckpt.get('charges') is not None:
             charges = ckpt['charges']
             print("[simulator] Charges restored from checkpoint.")
         elif charge_method == "xtb":
@@ -567,17 +614,10 @@ class IRSpectrumSimulator:
                                   logfile=logfile, loginterval=loginterval)
         _attach_writer(dyn_prod)
 
-        # Dynamic charges: if the calculator exposes per-atom charges (e.g.
-        # AIMNet2), use them at every step instead of the fixed charges stored
-        # in the tracker.  This captures ∂q/∂r (electronic polarisation
-        # response) at essentially no extra cost since charges are computed
-        # together with forces in a single forward pass.
-        _calc_has_charges = ("charges" in getattr(
-            getattr(atoms, "calc", None), "implemented_properties", []))
-        if _calc_has_charges:
-            print("[simulator] Dynamic charges detected (AIMNet2) — using "
-                  "per-step charges for dipole tracking.")
-
+        # Dynamic charges: when the calculator outputs per-atom charges, use
+        # them at every step instead of the fixed charges stored in the tracker.
+        # This captures ∂q/∂r (electronic polarisation response) at essentially
+        # no extra cost, since charges come from the same forward pass as forces.
         t0 = time.time()
         if f_start == 0:
             print(f"[simulator] Stage F  NVE production ({n_prod} steps)…")
@@ -585,7 +625,7 @@ class IRSpectrumSimulator:
 
         for step in range(f_start, n_prod):
             dyn_prod.run(1)
-            step_charges = atoms.get_charges() if _calc_has_charges else None
+            step_charges = atoms.get_charges() if has_charges else None
             dipoles[step] = tracker.update(atoms, charges=step_charges)
             if checkpoint_path and (step + 1) % checkpoint_interval == 0:
                 _ckpt_save(checkpoint_path, 'F', atoms, step=step + 1,
