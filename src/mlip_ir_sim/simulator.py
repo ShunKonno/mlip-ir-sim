@@ -138,14 +138,14 @@ class IRSpectrumSimulator:
             Per-atom force cap in eV/Å during Stages A–C.  Removed for D–F.
         anneal_T : float
             Melt/anneal temperature (K).  If greater than ``temperature``, the
-            warm-up/densify/NPT stages run at this temperature (above the
-            experimental melting point) so molecules can diffuse, form carboxyl
-            H-bond dimers and partially orient.  Then Stage G holds at ``anneal_T``
-            and Stage H slow-cools to ``temperature`` to freeze in the order.
+            warm-up/densify/NPT stages run at this elevated temperature so
+            molecules can diffuse and explore configurational space.  Stage G
+            then holds at ``anneal_T`` and Stage H slow-cools to ``temperature``
+            to reach a well-equilibrated low-temperature structure.
             Annealing is disabled when ``anneal_T ≤ temperature`` or ``anneal_ps``
             is 0 (the pipeline then behaves exactly as before).
         anneal_ps : float
-            Stage G duration: NPT hold at ``anneal_T`` (the H-bond sampling step).
+            Stage G duration: NPT hold at ``anneal_T``.
         cool_ps : float
             Stage H duration: NPT slow-cool ``anneal_T`` → ``temperature``.
         traj_path : str or None
@@ -266,9 +266,9 @@ class IRSpectrumSimulator:
         density_target = float(getattr(self.system.config, "density_gcc", 0.85))
         L_target = (mass_g / (density_target * 1e-24)) ** (1.0 / 3.0)
 
-        # Annealing: melt above the experimental m.p. so molecules can diffuse,
-        # form carboxyl H-bond dimers and partially orient, then slow-cool to the
-        # production temperature, freezing in the order.  When disabled, T_melt
+        # Annealing: run at elevated temperature so molecules can diffuse and
+        # sample a wider configurational space, then slow-cool to the production
+        # temperature.  When disabled, T_melt
         # collapses to `temperature` and Stages G/H are skipped (old behaviour).
         annealing = anneal_T > temperature and anneal_ps > 0.0
         T_melt = anneal_T if annealing else temperature
@@ -283,27 +283,6 @@ class IRSpectrumSimulator:
         n_eq   = max(1, int(round(eq_time_ps * 1e3 / timestep_fs)))
         n_prod = max(1, int(round(prod_time_ps * 1e3 / timestep_fs)))
 
-        # ── Carboxyl O···O intermolecular contact count (H-bond / dimer probe) ──
-        # Stearic acid has exactly two O atoms per molecule, both in the COOH
-        # group, and molecules are placed as contiguous equal-size blocks, so the
-        # parent molecule of atom i is i // n_at_per_mol.  An intermolecular O···O
-        # pair within ~3.3 Å is the signature of a hydrogen-bonded acid dimer.
-        _o_idx = np.where(atoms.get_atomic_numbers() == 8)[0]
-        _hb_ok = (n_mol is not None and n_mol > 0 and len(atoms) % n_mol == 0
-                  and len(_o_idx) >= 2)
-        _o_mol = (_o_idx // (len(atoms) // n_mol)) if _hb_ok else None
-
-        def _hbond_count(cutoff=3.3):
-            if not _hb_ok:
-                return -1
-            # Minimum image in fractional coordinates → valid for any cell shape
-            s = atoms.get_scaled_positions()[_o_idx]
-            ds = s[:, None, :] - s[None, :, :]
-            ds -= np.round(ds)
-            r = np.linalg.norm(ds @ atoms.get_cell()[:], axis=-1)
-            mask = (_o_mol[:, None] != _o_mol[None, :]) & (r < cutoff) & (r > 0.1)
-            return int(mask.sum() // 2)
-
         L0 = float(atoms.cell[0, 0])
         if is_crystal and annealing:
             print("[simulator] WARNING: annealing above the melting point will "
@@ -316,7 +295,7 @@ class IRSpectrumSimulator:
             f"L {L0:.1f}→{L_target:.1f} Å (ρ {_density_gcc():.3f}→{density_target:.3f})\n"
         )
         anneal_lines = (
-            f"  Stage G  Anneal    : {n_anneal} steps ({anneal_ps} ps)  NPT hold @ {T_melt} K (H-bond sampling)\n"
+            f"  Stage G  Anneal    : {n_anneal} steps ({anneal_ps} ps)  NPT hold @ {T_melt} K\n"
             f"  Stage H  Cool      : {n_cool} steps ({cool_ps} ps)  NPT {T_melt}→{temperature} K\n"
             if annealing else
             "  Stage G/H Anneal   : (disabled — anneal_T ≤ T or anneal_ps=0)\n"
@@ -453,14 +432,11 @@ class IRSpectrumSimulator:
                           f"L={atoms.cell[0,0]:.2f} Å  ρ={_density_gcc():.3f} g/cm³")
             print(f"[simulator] Stage D done in {time.time() - t0:.1f} s  "
                   f"→ ρ={_density_gcc():.3f} g/cm³, L={atoms.cell[0,0]:.2f} Å")
-            if _hb_ok:
-                print(f"[simulator] H-bond probe (intermolecular carboxyl O···O <3.3 Å): "
-                      f"{_hbond_count()} before annealing")
             _save('D')
 
         # ──────────────────── Stage G: Anneal hold (melt) ────────────────
-        # NPT hold above the melting point: molecules diffuse and carboxyl
-        # groups find partners → H-bond dimers form and chains partially align.
+        # NPT hold above the target temperature so the system can diffuse and
+        # sample a wider configurational space before slow-cooling to T.
         if annealing:
             if _done('G'):
                 print("[simulator] Stage G  skipped (checkpoint)")
@@ -482,9 +458,9 @@ class IRSpectrumSimulator:
                     dyn.run(1)
                     if (step + 1) % anneal_report == 0:
                         print(f"  anneal step {step+1}/{n_anneal}  "
-                              f"ρ={_density_gcc():.3f} g/cm³  H-bonds={_hbond_count()}")
+                              f"ρ={_density_gcc():.3f} g/cm³")
                 print(f"[simulator] Stage G done in {time.time() - t0:.1f} s  "
-                      f"→ H-bonds={_hbond_count()}")
+                      f"→ ρ={_density_gcc():.3f} g/cm³")
                 _save('G')
 
             # ─────────────────── Stage H: Slow-cool to T ─────────────────
@@ -512,9 +488,9 @@ class IRSpectrumSimulator:
                     dyn.run(1)
                     if (step + 1) % cool_report == 0:
                         print(f"  cool step {step+1}/{n_cool}  "
-                              f"ρ={_density_gcc():.3f} g/cm³  H-bonds={_hbond_count()}")
+                              f"ρ={_density_gcc():.3f} g/cm³")
                 print(f"[simulator] Stage H done in {time.time() - t0:.1f} s  "
-                      f"→ ρ={_density_gcc():.3f} g/cm³, H-bonds={_hbond_count()}")
+                      f"→ ρ={_density_gcc():.3f} g/cm³")
                 _save('H')
 
         # ──────────────────────── Stage E: NVT eq ─────────────────────────
@@ -532,9 +508,6 @@ class IRSpectrumSimulator:
             rho_final = _density_gcc()
             print(f"[simulator] Stage E done in {time.time() - t0:.1f} s  "
                   f"→ ρ={rho_final:.3f} g/cm³")
-            if _hb_ok:
-                print(f"[simulator] H-bond probe at production density: "
-                      f"{_hbond_count()} intermolecular carboxyl O···O contacts")
             _save('E')
 
         # ── Resuming Stage F?  (charge method must match, or the stored
