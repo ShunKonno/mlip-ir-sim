@@ -8,7 +8,8 @@ The pipeline drives **any ASE-compatible force field or MLIP** with an ASE MD en
 
 ## Purpose
 
-**Benchmarking force fields against experiment.** Because the spectrum is generated directly from the dynamics a given potential produces, overlaying it on a measured IR spectrum reveals *which physical effects the force field captures, misses, or underestimates* — e.g. a missing or red/blue-shifted carbonyl stretch, an absent hydrogen-bonding signature, or under-damped C–H modes. Running the same system through different potentials and comparing each to the experiment turns this library into a practical force-field / MLIP benchmark for vibrational spectroscopy.
+**Benchmarking force fields against experiment.** Because the spectrum is generated directly from the dynamics a given potential produces, overlaying it on a measured IR spectrum reveals *which physical effects the force field captures, misses, or underestimates* 
+Running the same system through different potentials and comparing each to the experiment turns this library into a practical force-field / MLIP benchmark for vibrational spectroscopy.
 
 **Which experimental spectrum to compare against.** The simulated output is a bulk transmission spectrum. At present it should be compared with **solid-powder transmission, or ATR measurements corrected back to a transmission-equivalent lineshape via an advanced ATR correction** (so the penetration-depth and dispersion distortions of raw ATR are removed). Support for **solution- and gas-phase transmission** comparisons is planned for future releases.
 
