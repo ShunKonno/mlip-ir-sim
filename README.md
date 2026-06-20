@@ -1,96 +1,187 @@
 # mlip-ir-sim
 
-**MLIP-based Infrared Spectroscopy Simulator**
+Python library for simulating **transmission IR spectra** of organic molecules using machine-learning interatomic potentials (MLIPs) and molecular dynamics.
 
-`mlip-ir-sim` is a Python library to compute **“pure” bulk IR absorption spectra (equivalent to transmission measurements)** from molecular dynamics (MD) trajectories driven by machine-learning interatomic potentials (MLIPs), and to compare them with experimental data.  
-The primary output is a **transmission-equivalent (bulk) IR spectrum** derived from dipole fluctuations in MD.  
-Optionally, the transmission-equivalent spectrum can be **converted to an ATR-like spectrum**, so you can inspect and compare **both** (Transmission and ATR) side-by-side.
+The pipeline couples a MACE (or AIMNet2) force field with an ASE MD engine to record the total dipole moment trajectory, Fourier-transforms the autocorrelation function into a broadened IR absorption spectrum, and returns a customisable `IRSpectrum` result object.
 
 ---
 
-## Background and design principles
+## Features
 
-From an MD trajectory, one can track the total dipole moment \(\mu(t)\) of the system. By computing its autocorrelation function (ACF) and Fourier transforming it (Wiener–Khinchin theorem), we obtain a **fundamental bulk IR spectrum** that corresponds most directly to **transmission-like absorption**.
-
-ATR (attenuated total reflection), while experimentally convenient, can show **wavelength-dependent distortions** (e.g., via penetration depth and Fresnel effects). To enable direct comparison with ATR-FTIR datasets, this project provides an **optional post-processing step** that maps the bulk (transmission-equivalent) spectrum to an ATR-like observable.
-
----
-
-## Key features (planned)
-
-- **Automated initialization and equilibration**
-  - Load an optimized single-molecule structure (XYZ) and an MLIP model (e.g., MACE)
-  - Build a periodic cell with the requested number of molecules and equilibrate (e.g., NPT)
-- **Dipole moment tracking**
-  - Run a production MD trajectory and record energies, forces, and \(\mu(t)\)
-- **Pure bulk IR via Wiener–Khinchin**
-  - ACF of \(\mu(t)\) → FFT-based spectral estimation
-- **Transmission → ATR conversion (optional)**
-  - Apply a wavelength-dependent transformation to approximate ATR-FTIR observables
+- Random-packing or crystal-start (CIF) simulation cell builder
+- Multi-stage MD equilibration (cold eq → warm-up → densification → NPT → NVT → NVE production)
+- Dipole ACF → transmission IR spectrum with Schofield / detailed-balance quantum correction
+- `IRSpectrum` result object with matplotlib plotting and CSV / JSON serialisation
+- Checkpoint / resume support for long HPC runs
+- Optional GFN2-xTB partial charges (conformer-specific, via tblite)
+- Optional AIMNet2 dynamic-charge calculator (∂q/∂r at every MD step)
 
 ---
 
-## Tech stack (planned)
+## Installation
 
-- **Molecular simulation**: `ase`
-- **MLIP calculator**: `mace-torch` (or a compatible ASE calculator)
-- **Numerics & signal processing**: `numpy`, `scipy`
-- **Plotting**: `matplotlib` (optional)
+```bash
+pip install mlip-ir-sim
+```
+
+Core runtime dependencies: ASE, NumPy, SciPy, matplotlib.
+
+### Calculator back-ends (choose at least one)
+
+| Back-end | Install |
+|---|---|
+| MACE-OFF23 / MACE-MP | `pip install "mlip-ir-sim[mace]"` |
+| GFN2-xTB partial charges | `pip install "mlip-ir-sim[xtb]"` |
 
 ---
 
-## Usage (proposed API)
-
-This is a target API shown in the README; implementations will be added incrementally.
+## Quick start
 
 ```python
 from mlip_ir_sim import SystemBuilder, IRSpectrumSimulator
-from mlip_ir_sim.corrections import apply_atr_correction
 
-# 1) Build a periodic system from an XYZ and an MLIP model
-system = SystemBuilder(xyz_path="data/sample_mol.xyz", num_molecules=32, model="mace_mp")
+# 1. Build a simulation cell from a single-molecule XYZ file
+system = SystemBuilder(
+    xyz_path="molecule.xyz",
+    num_molecules=30,
+    model="MACE-OFF23(Small)",
+    density_gcc=0.85,
+    device="cpu",          # "cpu" | "cuda" | "mps" | "auto"
+)
 
-# 2) Run equilibration + production and compute a pure bulk IR spectrum
-simulator = IRSpectrumSimulator(system)
-pure_ir = simulator.run(temperature=300, pressure=1.0, eq_time_ps=5.0, prod_time_ps=20.0)
+# 2. Run the MD pipeline
+sim = IRSpectrumSimulator(system)
+spectrum = sim.run(
+    temperature=300.0,     # K
+    eq_time_ps=5.0,        # NVT equilibration duration
+    prod_time_ps=50.0,     # NVE production duration (longer → finer resolution)
+    fwhm_cm1=10.0,         # Gaussian peak broadening
+)
 
-# 3) Optionally convert the transmission-equivalent spectrum to an ATR-like spectrum
-atr = apply_atr_correction(pure_ir, refractive_index_crystal=2.4)  # e.g., Diamond ATR
+# 3. Plot — returns (fig, ax) for further customisation
+fig, ax = spectrum.plot(title="Simulated IR")
+ax.set_xlim(4000, 400)    # zoom to fingerprint + functional-group region
+fig.savefig("ir_spectrum.png", dpi=150)
 
-# Save and plot (examples)
-pure_ir.plot(show_experimental="data/sample_exp_transmission.csv")
-atr.plot(show_experimental="data/sample_exp_atr.csv")
+# 4. Save spectrum data
+spectrum.save("ir_spectrum.csv")                    # two-column CSV
+spectrum.save("ir_spectrum.json", format="json")    # JSON with metadata
+```
+
+### Crystal-start simulation (from CIF)
+
+```python
+system = SystemBuilder(
+    cif_path="structure.cif",
+    model="MACE-OFF23(Small)",
+    device="cpu",
+)
+
+sim = IRSpectrumSimulator(system)
+spectrum = sim.run(temperature=300.0, eq_time_ps=5.0, prod_time_ps=50.0)
 ```
 
 ---
 
-## Directory structure
+## API reference
 
+### `SystemBuilder`
+
+```python
+SystemBuilder(
+    xyz_path: str | Path | None = None,      # single-molecule XYZ (random packing)
+    num_molecules: int = 0,
+    model: str | None = None,                 # "MACE-OFF23(Small/Medium/Large)"
+    density_gcc: float = 0.85,                # target density (g/cm³)
+    device: str = "cpu",                      # "cpu" | "cuda" | "mps" | "auto"
+    dtype: str = "float32",
+    cif_path: str | Path | None = None,       # crystal-start (alternative to xyz_path)
+    supercell: tuple[int, int, int] | None = None,
+)
 ```
-mlip-ir-sim/
-  README.md
-  requirements.txt
-  .gitignore
-  src/
-    mlip_ir_sim/
-      __init__.py
-      builder.py
-      simulator.py
-      spectrum.py
-      corrections.py
-  notebooks/
-    demo_simulation.ipynb
-  data/
-    sample_mol.xyz
-    sample_exp_transmission.csv
-    sample_exp_atr.csv
+
+Call `.build()` to obtain the ASE `Atoms` object (result is cached).
+
+### `IRSpectrumSimulator.run()`
+
+| Parameter | Default | Description |
+|---|---|---|
+| `temperature` | — | Target temperature (K) |
+| `pressure` | `1.0` | NPT pressure (bar) |
+| `eq_time_ps` | — | NVT equilibration duration (ps) |
+| `prod_time_ps` | — | NVE production duration (ps) — determines frequency resolution |
+| `timestep_fs` | `0.5` | MD timestep (fs) |
+| `fwhm_cm1` | `10.0` | Gaussian peak width (cm⁻¹) |
+| `quantum_correction` | `"schofield"` | `"schofield"` / `"detailed_balance"` / `"none"` |
+| `charge_method` | `"xtb"` | `"xtb"` (GFN2) or `"gaff"` (rule-based) |
+| `traj_path` | `None` | Path for Extended-XYZ trajectory (OVITO-readable) |
+| `checkpoint_path` | `None` | Checkpoint file for pause/resume |
+| `anneal_T` | `0.0` | Melt temperature for annealing stage (K) |
+| `anneal_ps` | `0.0` | NPT hold at `anneal_T` (ps) |
+| `cool_ps` | `0.0` | Slow-cool `anneal_T → temperature` (ps) |
+
+Returns an `IRSpectrum`.
+
+### `IRSpectrum`
+
+#### Plotting
+
+```python
+fig, ax = spectrum.plot(
+    ax=None,               # existing Axes, or None to create a new figure
+    label="Simulated",
+    color="steelblue",
+    figsize=(10, 4),
+    xlim=(4500, 200),      # IR convention: high ν on the left
+    ylim=(-0.02, 1.12),
+    # any extra kwargs are forwarded to ax.plot()
+)
+
+# Overlay two spectra
+fig, ax = spectrum.compare(
+    other,
+    labels=("Simulated", "Experimental"),
+    colors=("steelblue", "firebrick"),
+)
 ```
+
+#### Saving and loading
+
+```python
+spectrum.save("out.csv")                      # CSV (default)
+spectrum.save("out.json", format="json")      # JSON (includes metadata)
+spectrum.save_csv("out.csv")
+spectrum.save_json("out.json")
+
+loaded = IRSpectrum.load("out.csv")           # auto-detect from extension
+loaded = IRSpectrum.load("out.json")
+loaded = IRSpectrum.load_csv("out.csv")
+loaded = IRSpectrum.load_json("out.json")
+```
+
+`spectrum.metadata` is a dict containing simulation parameters
+(temperature, timestep, frequency resolution, quantum correction, final density, etc.).
 
 ---
 
-## Development notes (first milestones)
+## Frequency resolution
 
-- Load an XYZ and replicate/place molecules into a PBC cell
-- Run short MD with an arbitrary ASE calculator (a simple LJ toy system is fine to start)
-- Record \(\mu(t)\) → ACF → FFT and obtain a “reasonable-looking” spectrum (units/prefactors to be made rigorous later)
+The intrinsic frequency resolution scales with production time:
 
+```
+Δν [cm⁻¹] = 1 / (N_steps × dt_s × c_cm)
+```
+
+| `prod_time_ps` (dt = 0.5 fs) | Δν |
+|---|---|
+| 10 ps | ≈ 3.3 cm⁻¹ |
+| 33 ps | ≈ 1.0 cm⁻¹ |
+| 50 ps | ≈ 0.7 cm⁻¹ |
+
+Zero-padding (applied internally) refines the display grid but does not improve the intrinsic resolution.
+
+---
+
+## License
+
+MIT

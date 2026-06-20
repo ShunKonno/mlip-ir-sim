@@ -7,16 +7,31 @@ __pycache__/
 .DS_Store
 
 # Notebooks
+notebooks/
 .ipynb_checkpoints/
 
-# Simulation outputs / trajectories
+# Simulation outputs and trajectories
+outputs/
 *.traj
 *.xyz.bak
 *.log
 *.out
 *.nc
 
-# Local envs
+# Scripts and dev tooling
+scripts/
+
+# Sample / test data (CSV, CIF, XYZ, PNG, images)
+data/
+
+# Local virtual environments
 .venv/
+.venv_hpc/
 venv/
 
+# HPC credentials
+.env.hpc
+
+# Internal planning docs (not for public repo)
+CLAUDE.md
+PLAN.md

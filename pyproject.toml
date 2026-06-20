@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mlip-ir-sim"
+version = "0.1.0"
+description = "Transmission IR spectrum simulation from MLIP molecular dynamics"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["IR spectroscopy", "MLIP", "molecular dynamics", "MACE", "ASE"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "ase",
+    "numpy",
+    "scipy",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+mace = ["mace-torch"]
+xtb  = ["tblite"]
+dev  = ["pytest", "ruff"]
+
+[project.urls]
+"Source Code" = "https://github.com/ShunKonno/mlip-ir-sim"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 99
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["mace: tests requiring mace-torch (may be slow)"]
