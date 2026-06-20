@@ -13,6 +13,7 @@ Running the same system through different potentials and comparing each to the e
 
 **Which experimental spectrum to compare against.** 
 The simulated output is a bulk transmission spectrum. At present it should be compared with **solid-powder transmission, or ATR measurements via an advanced ATR correction**. 
+
 Support for **solution- and gas-phase transmission** comparisons is planned for future releases.
 
 ---
